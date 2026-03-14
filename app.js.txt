@@ -1,0 +1,393 @@
+// Forex Signals Pro - Main Application
+const state = {
+    favorites: ['EURUSD', 'GBPUSD', 'XAUUSD'],
+    currentSymbol: 'EURUSD',
+    priceData: {},
+    historicalData: {},
+    alertActive: false
+};
+
+const instruments = [
+    { symbol: 'EURUSD', name: 'Euro / US Dollar', pip: 0.0001 },
+    { symbol: 'GBPUSD', name: 'British Pound / US Dollar', pip: 0.0001 },
+    { symbol: 'USDJPY', name: 'US Dollar / Japanese Yen', pip: 0.01 },
+    { symbol: 'AUDUSD', name: 'Australian Dollar / US Dollar', pip: 0.0001 },
+    { symbol: 'USDCAD', name: 'US Dollar / Canadian Dollar', pip: 0.0001 },
+    { symbol: 'EURGBP', name: 'Euro / British Pound', pip: 0.0001 },
+    { symbol: 'GBPJPY', name: 'British Pound / Japanese Yen', pip: 0.01 },
+    { symbol: 'XAUUSD', name: 'Gold / US Dollar', pip: 0.01 },
+    { symbol: 'XAGUSD', name: 'Silver / US Dollar', pip: 0.001 },
+    { symbol: 'US30', name: 'Dow Jones 30', pip: 1 },
+    { symbol: 'US500', name: 'S&P 500', pip: 0.1 },
+    { symbol: 'NAS100', name: 'Nasdaq 100', pip: 1 }
+];
+
+// Technical Analysis
+class TA {
+    static EMA(data, period) {
+        if (data.length < period) return data[data.length - 1]?.close || 0;
+        const multiplier = 2 / (period + 1);
+        let ema = data.slice(0, period).reduce((a, b) => a + b.close, 0) / period;
+        for (let i = period; i < data.length; i++) {
+            ema = (data[i].close - ema) * multiplier + ema;
+        }
+        return ema;
+    }
+
+    static RSI(data, period = 14) {
+        if (data.length < period + 1) return 50;
+        let gains = 0, losses = 0;
+        for (let i = data.length - period; i < data.length; i++) {
+            const change = data[i].close - data[i-1].close;
+            if (change > 0) gains += change;
+            else losses -= change;
+        }
+        const rs = (gains / period) / ((losses / period) || 1);
+        return 100 - (100 / (1 + rs));
+    }
+
+    static MACD(data) {
+        const ema12 = this.EMA(data.slice(-24), 12);
+        const ema26 = this.EMA(data.slice(-52), 26);
+        return { macd: ema12 - ema26, signal: (ema12 - ema26) * 0.9 };
+    }
+
+    static ATR(data, period = 14) {
+        if (data.length < period) return 0;
+        const trs = data.slice(-period).map(c => c.high - c.low);
+        return trs.reduce((a, b) => a + b, 0) / period;
+    }
+}
+
+function generatePrice(symbol) {
+    const bases = {
+        'EURUSD': 1.0845, 'GBPUSD': 1.2634, 'USDJPY': 149.32,
+        'AUDUSD': 0.6542, 'USDCAD': 1.3542, 'EURGBP': 0.8575,
+        'GBPJPY': 188.45, 'XAUUSD': 2034.80, 'XAGUSD': 22.85,
+        'US30': 38420, 'US500': 5120.5, 'NAS100': 18250
+    };
+    const base = bases[symbol] || 1.0;
+    const change = (Math.random() - 0.5) * 0.002;
+    return parseFloat((base + change).toFixed(5));
+}
+
+function analyzeSymbol(symbol) {
+    const data = state.historicalData[symbol];
+    if (!data || data.length < 30) return null;
+    
+    const current = data[data.length - 1];
+    const inst = instruments.find(i => i.symbol === symbol);
+    
+    const ema20 = TA.EMA(data, 20);
+    const ema50 = TA.EMA(data, 50);
+    const rsi = TA.RSI(data, 14);
+    const macd = TA.MACD(data);
+    const atr = TA.ATR(data, 14);
+    
+    const recent = data.slice(-20);
+    const support = Math.min(...recent.map(c => c.low));
+    const resistance = Math.max(...recent.map(c => c.high));
+    
+    // Pattern detection
+    const c1 = data[data.length - 1];
+    const c2 = data[data.length - 2];
+    const body = Math.abs(c1.close - c1.open);
+    const wickLower = Math.min(c1.open, c1.close) - c1.low;
+    const wickUpper = c1.high - Math.max(c1.open, c1.close);
+    
+    let pattern = 'NONE';
+    if (wickLower > body * 2 && c1.close > c1.open) pattern = 'BULLISH PIN BAR';
+    else if (wickUpper > body * 2 && c1.close < c1.open) pattern = 'BEARISH PIN BAR';
+    else if (c2.close < c2.open && c1.close > c1.open && c1.open < c2.close && c1.close > c2.open) pattern = 'BULLISH ENGULFING';
+    else if (c2.close > c2.open && c1.close < c1.open && c1.open > c2.close && c1.close < c2.open) pattern = 'BEARISH ENGULFING';
+    
+    // Scoring
+    let bullish = 0, bearish = 0;
+    if (ema20 > ema50) bullish += 20; else bearish += 20;
+    if (rsi > 50 && rsi < 70) bullish += 15; else if (rsi < 50 && rsi > 30) bearish += 15;
+    if (macd.macd > macd.signal) bullish += 15; else bearish += 15;
+    if (current.close <= support * 1.001) bullish += 20;
+    if (current.close >= resistance * 0.999) bearish += 20;
+    if (pattern.includes('BULLISH')) bullish += 25;
+    if (pattern.includes('BEARISH')) bearish += 25;
+    
+    let signal = 'NEUTRAL', confidence = Math.max(bullish, bearish);
+    if (bullish > bearish && bullish >= 70) { signal = 'BUY'; confidence = bullish; }
+    else if (bearish > bullish && bearish >= 70) { signal = 'SELL'; confidence = bearish; }
+    
+    const entry = current.close;
+    let sl, tp;
+    if (signal === 'BUY') {
+        sl = Math.min(current.low - atr, support - inst.pip * 5);
+        tp = entry + (entry - sl) * 2;
+    } else if (signal === 'SELL') {
+        sl = Math.max(current.high + atr, resistance + inst.pip * 5);
+        tp = entry - (sl - entry) * 2;
+    }
+    
+    return {
+        symbol, signal, confidence, pattern,
+        entry: entry.toFixed(5),
+        stopLoss: sl ? sl.toFixed(5) : null,
+        takeProfit: tp ? tp.toFixed(5) : null,
+        riskReward: sl ? (Math.abs(tp - entry) / Math.abs(entry - sl)).toFixed(1) : null,
+        expectedPips: sl ? Math.round(Math.abs(tp - entry) / inst.pip) : 0,
+        indicators: { rsi: rsi.toFixed(1), ema20: ema20.toFixed(5) }
+    };
+}
+
+function updateCandles(symbol, price) {
+    if (!state.historicalData[symbol]) {
+        state.historicalData[symbol] = [];
+        let p = price;
+        for (let i = 50; i >= 0; i--) {
+            const time = Math.floor(Date.now() / 1000) - i * 60;
+            const open = p;
+            const close = open + (Math.random() - 0.5) * 0.001;
+            const high = Math.max(open, close) + Math.random() * 0.0005;
+            const low = Math.min(open, close) - Math.random() * 0.0005;
+            state.historicalData[symbol].push({ time, open, high, low, close });
+            p = close;
+        }
+    } else {
+        const data = state.historicalData[symbol];
+        const last = data[data.length - 1];
+        const now = Math.floor(Date.now() / 1000);
+        
+        if (now - last.time >= 60) {
+            data.push({ time: now, open: price, high: price, low: price, close: price });
+            if (data.length > 100) data.shift();
+        } else {
+            last.close = price;
+            last.high = Math.max(last.high, price);
+            last.low = Math.min(last.low, price);
+        }
+    }
+}
+
+function renderSignals() {
+    const container = document.getElementById('signalCards');
+    container.innerHTML = '';
+    
+    let buyCount = 0, sellCount = 0;
+    
+    state.favorites.forEach(symbol => {
+        const price = generatePrice(symbol);
+        state.priceData[symbol] = price;
+        updateCandles(symbol, price);
+        
+        const signal = analyzeSymbol(symbol);
+        if (!signal) return;
+        
+        if (signal.signal === 'BUY') buyCount++;
+        if (signal.signal === 'SELL') sellCount++;
+        
+        const isHighConf = signal.confidence >= 90;
+        const color = signal.signal === 'BUY' ? '#26a69a' : signal.signal === 'SELL' ? '#ef5350' : '#78909c';
+        
+        const card = document.createElement('div');
+        card.className = `bg-[#1a1f2e] rounded-xl p-4 border-2 cursor-pointer ${isHighConf ? 'border-[#ffd700] animate-pulse-gold' : ''}`;
+        card.style.borderColor = isHighConf ? '#ffd700' : color;
+        card.onclick = () => openChart(symbol);
+        
+        card.innerHTML = `
+            <div class="flex justify-between items-start mb-2">
+                <div>
+                    <h3 class="text-lg font-bold text-white">${symbol}</h3>
+                    <p class="text-xs text-gray-400">${signal.pattern}</p>
+                </div>
+                <div class="text-right">
+                    <div class="text-lg font-bold text-white mono">${signal.entry}</div>
+                </div>
+            </div>
+            <div class="flex justify-between items-center">
+                <div class="text-2xl font-bold" style="color: ${color}">${signal.signal}</div>
+                <div class="text-xl font-bold text-white">${signal.confidence}%</div>
+            </div>
+            ${signal.signal !== 'NEUTRAL' ? `
+                <div class="mt-2 flex justify-between text-xs">
+                    <span class="text-gray-400">R:R ${signal.riskReward}</span>
+                    <span class="text-[#26a69a]">+${signal.expectedPips} pips</span>
+                </div>
+            ` : ''}
+            ${isHighConf ? `<div class="mt-2 bg-[#ffd700] text-black text-xs font-bold py-1 px-2 rounded inline-block">ALERT</div>` : ''}
+        `;
+        
+        container.appendChild(card);
+        
+        if (isHighConf && !state.alertActive && Math.random() < 0.05) {
+            setTimeout(() => showAlert(signal), 500);
+        }
+    });
+    
+    document.getElementById('favCount').textContent = state.favorites.length;
+    
+    const total = buyCount + sellCount || 1;
+    document.getElementById('sentimentBar').style.width = ((buyCount / total) * 100) + '%';
+    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+}
+
+function renderAvailablePairs() {
+    const container = document.getElementById('availablePairs');
+    container.innerHTML = '';
+    
+    instruments.forEach(inst => {
+        const isFav = state.favorites.includes(inst.symbol);
+        const row = document.createElement('div');
+        row.className = 'bg-[#1a1f2e] rounded-lg p-3 flex justify-between items-center';
+        row.innerHTML = `
+            <div>
+                <div class="font-bold text-white">${inst.symbol}</div>
+                <div class="text-xs text-gray-400">${inst.name}</div>
+            </div>
+            <button onclick="toggleFavorite('${inst.symbol}')" 
+                    class="w-8 h-8 rounded-full ${isFav ? 'bg-[#ffd700] text-black' : 'bg-[#2a2f3e] text-white'} flex items-center justify-center font-bold">
+                ${isFav ? '✓' : '+'}
+            </button>
+        `;
+        container.appendChild(row);
+    });
+}
+
+let chart = null, candleSeries = null;
+
+function openChart(symbol) {
+    state.currentSymbol = symbol;
+    const signal = analyzeSymbol(symbol);
+    const data = state.historicalData[symbol];
+    
+    document.getElementById('chartSymbol').textContent = symbol;
+    
+    if (signal) {
+        document.getElementById('chartSignalDir').textContent = signal.signal;
+        document.getElementById('chartSignalDir').style.color = signal.signal === 'BUY' ? '#26a69a' : signal.signal === 'SELL' ? '#ef5350' : '#78909c';
+        document.getElementById('chartSignalConf').textContent = signal.confidence + '%';
+        document.getElementById('chartPrice').textContent = signal.entry;
+        document.getElementById('chartEntry').textContent = signal.entry;
+        document.getElementById('chartSL').textContent = signal.stopLoss || '--';
+        document.getElementById('chartTP').textContent = signal.takeProfit || '--';
+    }
+    
+    showSection('chart');
+    
+    setTimeout(() => {
+        const container = document.getElementById('chart');
+        container.innerHTML = '';
+        
+        chart = LightweightCharts.createChart(container, {
+            layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
+            grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
+            rightPriceScale: { borderColor: '#2B2B43' },
+            timeScale: { borderColor: '#2B2B43', timeVisible: true },
+        });
+        
+        candleSeries = chart.addCandlestickSeries({
+            upColor: '#26a69a', downColor: '#ef5350',
+            borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+            wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        });
+        
+        if (data) {
+            candleSeries.setData(data);
+            if (signal && signal.confidence >= 85) {
+                candleSeries.setMarkers([{
+                    time: data[data.length - 3].time,
+                    position: signal.signal === 'BUY' ? 'belowBar' : 'aboveBar',
+                    color: signal.signal === 'BUY' ? '#26a69a' : '#ef5350',
+                    shape: signal.signal === 'BUY' ? 'arrowUp' : 'arrowDown',
+                    text: signal.signal + ' ' + signal.confidence + '%',
+                    size: 2
+                }]);
+            }
+            chart.timeScale().fitContent();
+        }
+    }, 100);
+}
+
+function showAlert(signal) {
+    if (state.alertActive) return;
+    
+    document.getElementById('alertSymbol').textContent = signal.symbol;
+    document.getElementById('alertDetails').innerHTML = `
+        <div class="flex justify-between"><span class="text-gray-400">Signal:</span><span class="${signal.signal === 'BUY' ? 'text-[#26a69a]' : 'text-[#ef5350]'} font-bold">${signal.signal} ${signal.confidence}%</span></div>
+        <div class="flex justify-between"><span class="text-gray-400">Pattern:</span><span class="text-white">${signal.pattern}</span></div>
+        <div class="flex justify-between"><span class="text-gray-400">Entry:</span><span class="mono text-white">${signal.entry}</span></div>
+        <div class="flex justify-between"><span class="text-gray-400">SL/TP:</span><span><span class="mono text-[#ef5350]">${signal.stopLoss}</span> / <span class="text-[#69f0ae]">${signal.takeProfit}</span></span></div>
+    `;
+    
+    document.getElementById('alertModal').classList.remove('hidden');
+    state.alertActive = true;
+}
+
+function acknowledgeAlert() {
+    state.alertActive = false;
+    document.getElementById('alertModal').classList.add('hidden');
+}
+
+function showSection(name) {
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(b => {
+        b.classList.remove('text-[#ffd700]');
+        b.classList.add('text-gray-400');
+    });
+    
+    const map = { 'signals': 'signalsSection', 'chart': 'chartSection', 'addFavorite': 'addFavorite', 'settings': 'settingsSection' };
+    if (map[name]) document.getElementById(map[name]).classList.add('active');
+    
+    const btn = document.querySelector(`[data-section="${name}"]`);
+    if (btn) {
+        btn.classList.add('text-[#ffd700]');
+        btn.classList.remove('text-gray-400');
+    }
+    
+    if (name === 'addFavorite') renderAvailablePairs();
+}
+
+function toggleFavorite(symbol) {
+    const idx = state.favorites.indexOf(symbol);
+    if (idx > -1) {
+        if (state.favorites.length > 1) state.favorites.splice(idx, 1);
+        else return;
+    } else {
+        if (state.favorites.length < 5) state.favorites.push(symbol);
+        else return;
+    }
+    renderAvailablePairs();
+    renderSignals();
+}
+
+function updateThreshold(val) {
+    document.getElementById('thresholdValue').textContent = val + '%';
+}
+
+// Search
+document.getElementById('searchInput')?.addEventListener('input', (e) => {
+    const query = e.target.value.toLowerCase();
+    const results = document.getElementById('searchResults');
+    
+    if (query.length > 0) {
+        results.classList.remove('hidden');
+        const matches = instruments.filter(i => i.symbol.toLowerCase().includes(query) || i.name.toLowerCase().includes(query));
+        results.innerHTML = matches.map(i => `
+            <div class="p-3 hover:bg-[#2a2f3e] cursor-pointer border-b border-[#2a2f3e] last:border-0" onclick="openChart('${i.symbol}')">
+                <div class="font-bold text-white">${i.symbol}</div>
+                <div class="text-xs text-gray-400">${i.name}</div>
+            </div>
+        `).join('');
+    } else {
+        results.classList.add('hidden');
+    }
+});
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+    renderSignals();
+    setInterval(renderSignals, 3000);
+});
+
+// Expose globals
+window.showSection = showSection;
+window.toggleFavorite = toggleFavorite;
+window.openChart = openChart;
+window.acknowledgeAlert = acknowledgeAlert;
+window.updateThreshold = updateThreshold;
